@@ -1,0 +1,370 @@
+---
+title: "SCS Data Visualisation Toolkit"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(GGally)
+library(patchwork)
+
+get_heatmap <- function(df,cor_type = "pearson"){
+cmat <- cor(df %>% select_if(is.numeric),
+            use = "complete.obs",method = cor_type) %>% as.data.frame() 
+cmat <- cmat %>% mutate(V1 = names(cmat))
+cmat <- cmat %>% pivot_longer(-V1,names_to = "V2",values_to = "corr")
+
+ggheatmap <- ggplot(cmat, aes(V1, V2, fill = corr))+
+  geom_tile(color = "white")+
+  geom_text(aes(V1, V2, label = round(corr,3)), color = "black", size = 4) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name=paste0(c(cor_type,"\nCorrelation"))) +
+  theme_minimal()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1))+
+  coord_fixed()
+return(ggheatmap)
+}
+
+get_qq_plots <- function(df){
+  map(colnames(df %>% select_if(is.numeric)),function(column_name){
+  pval <- shapiro.test(df[[column_name]])$p.value
+  color <- ifelse(pval < 0.05,"red","blue")
+  df[,column_name] %>% drop_na() %>% rename(c("y" = column_name)) %>% mutate(rejected = ifelse(pval < 0.05,"red","blue")) %>% 
+    ggplot(aes(sample = y,color = rejected)) +
+    stat_qq(show.legend = FALSE)+
+    stat_qq_line(show.legend = FALSE)+
+    theme_minimal() + 
+    labs(title = paste("Normal QQ plot for",column_name),
+         subtitle = paste("Shapiro Wilk Test p-value",round(pval,5)))
+}) %>% wrap_plots()
+}
+
+get_normality_results <- function(df){
+  map_dfr(colnames(df %>% select_if(is.numeric)),function(column_name){
+    pval <- shapiro.test(df[[column_name]])$p.value
+    data.frame(Column = column_name, `p-value` = pval, Normality = ifelse(pval < 0.05,"Not Normal","Normal"))
+  })
+}
+
+make_explorer_plot <- function(df, x, y = NULL,
+                               color=NULL,fill=NULL,
+                               size=NULL,geom="bar"){
+  to_sym <- function(colstr){
+    if(is.null(colstr)){
+      return(NULL)
+    }else{
+      return(sym(colstr))
+    }
+  }
+  
+  title_from_geom <- function(geom){
+    case_when(geom == "bar" ~ "Barplot",
+              geom == "histogram" ~ "Histogram",
+              geom == "point" ~ "Scatterplot",
+              geom == "boxplot" ~ "Boxplot",
+              geom == "point_line" ~ "Line plot")
+  }
+  
+  theme_set(theme_minimal())
+  if(is.null(y)){
+    main_plot <- qplot(!!sym(x),data=df,
+          color=!!to_sym(color),fill=!!to_sym(fill),size=!!to_sym(size),
+          geom=geom)
+  }else{
+    if(geom == "bar"){
+      main_plot <- ggplot(data = df,aes(!!sym(x),!!sym(y)))+
+        geom_bar(stat="identity")
+    }else if(geom == "point_line"){
+      main_plot <- ggplot(data = df,aes(!!sym(x),!!sym(y)))+
+        geom_point() +
+        geom_line()
+    }else{
+      main_plot <- qplot(!!sym(x),!!sym(y),data=df,
+            color=!!to_sym(color),fill=!!to_sym(fill),size=!!to_sym(size),
+            geom=geom)
+    }
+  }
+  main_plot + 
+    labs(title = paste0(title_from_geom(geom)," of ",x," and  ",y))
+}
+```
+
+Summary
+======================================================================
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+Upload your csv file here. 
+
+```{r}
+fileInput("file", "Choose CSV File",
+                multiple = FALSE,
+                accept = c("text/csv",
+                         "text/comma-separated-values,text/plain",
+                         ".csv"))
+df <- reactive({
+  req(input$file)
+  read_csv(input$file$datapath)
+})
+```
+
+Data needs to be in tidy format [Learn more](https://wwww.google.lk)
+
+Row {data-height=100}
+-----------------------------------------------------------------------
+
+### Missing values
+
+```{r}
+renderValueBox({
+total_missing_count <- sum(is.na(df()))
+valueBox(total_missing_count, 
+         icon = "fa-question",
+         color = ifelse(total_missing_count > 0, "warning", "primary"))
+})
+```
+
+
+### Constant Columns
+
+```{r}
+renderValueBox({
+  const_cols <- sum(apply(df(),2,function(col){length(unique(col))}) == 1)
+  valueBox(const_cols,icon="fa-table")
+})
+```
+
+### Numeric columns
+```{r}
+renderValueBox({
+  valueBox(ncol(df() %>% select_if(is.numeric)),icon="fa-table")
+})
+```
+
+### Character columns
+```{r}
+renderValueBox({
+  valueBox(ncol(df() %>% select_if(is.character)),icon="fa-table")
+})
+```
+
+### Date columns
+
+```{r}
+renderValueBox({
+  date_cols <- sum(suppressWarnings(sapply(df(),function(col){!any(is.na(lubridate::parse_date_time(col[!is.na(col)],c("ymd","dmy","mdy"))))})))
+  valueBox(date_cols,icon="fa-table")
+})
+```
+
+Row 
+--------------------------------------------------------
+
+### Missing value percentages breakdown
+
+```{r}
+renderPlot({
+skimr::skim(df()) %>% 
+  tibble() %>% 
+    select(skim_variable,complete_rate) %>%
+    mutate(missing_rate = (1-complete_rate)*100,
+           skim_variable = fct_reorder(skim_variable,missing_rate)) %>% 
+  ggplot(aes(x = skim_variable,y = missing_rate))+
+  geom_bar(stat="identity")+
+  coord_flip()+
+  theme_minimal()+
+  scale_y_continuous(labels = scales::percent) + 
+  labs(title = "Percentages of missing values in datasets",x = "Variable",
+       y = "Percentage of missing values")  
+})
+```
+
+
+### Date Continuity
+
+```{r}
+renderPlot({
+  date_cols <- colnames(df())[suppressWarnings(sapply(df(),function(col){!any(is.na(lubridate::parse_date_time(col[!is.na(col)],c("ymd","dmy","mdy"))))}))]
+if(length(date_cols) != 0){
+  date_df <- map_dfr(date_cols,function(col){
+    sec <- df() %>% 
+      count(!!sym(col)) %>% 
+      mutate(Series = col,Dates = lubridate::parse_date_time(!!sym(col),c("ymd","dmy","mdy")))
+    print(sec)
+    return(sec)
+  }) 
+
+  date_df %>% 
+    group_by(Series,Dates) %>% 
+    summarize(AverageObs = mean(n)) %>% 
+    ggplot(aes(x = Dates, y = AverageObs,color = Series)) +
+    geom_point()+
+    theme_minimal()+
+    theme(legend.position="bottom")+
+    labs(x = "Date",y = "Average number of observations",
+         title = "Continuity of dates")
+    
+}
+})
+```
+
+
+### Numerical Composition
+
+```{r}
+library(ggVennDiagram)
+
+plotly::renderPlotly({
+# List of items
+neg <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col < 0,na.rm = TRUE))]
+pos <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col > 0,na.rm = TRUE))]
+zero <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col == 0,na.rm = TRUE))]
+
+x <- list(`Negative` = neg,
+          `Positive` = pos,
+          `Zero` = zero)
+# 3D Venn diagram
+ggVennDiagram(x,show_intersect=TRUE)
+})
+```
+
+
+Data Explorer
+========================================================
+
+Inputs {.sidebar}
+--------------------------------------------------------
+```{r}
+renderUI({
+selectInput("select_X","X variable",choices = colnames(df()))
+})
+selectInput("select_geom","Type of plot",
+            choices = c("Barplot"="bar",
+                        "Scatter plot"="point",
+                        "Histogram" = "histogram",
+                        "Boxplot" = "boxplot",
+                        "Line plot"="point_line"))
+renderUI({
+selectInput("select_Y","Y variable",choices = c(" ",colnames(df())))
+})
+renderUI({
+selectInput("select_color","Color by variable",
+            choices = c(" ",colnames(df())))
+})
+renderUI({
+selectInput("select_fill","Fill by variable",
+            choices = c(" ",colnames(df())))
+})
+renderUI({
+selectInput("select_size","Size by variable",
+            choices = c(" ",colnames(df())))
+})
+```
+
+
+Row
+-------------------------------------------------------
+### Overview plot
+```{r}
+renderPlot({
+  clean <- function(input_){
+    if(input_ == " "){
+      return(NULL)
+    }else{
+      return(input_)
+    }
+  }
+  if(!is.null(input$select_X)){
+    make_explorer_plot(df(),x = input$select_X,y = clean(input$select_Y),
+                       color = clean(input$select_color),
+                       fill = clean(input$select_fill),
+                       size = clean(input$select_size),
+                       geom = input$select_geom)
+  }
+})
+```
+
+
+Correlations
+=========================================================
+
+Row {.tabset .tabset-fade}
+---------------------------------------------------------
+
+### Pearson
+```{r}
+renderPlot({
+  get_heatmap(df())
+})
+```
+
+### Spearman
+```{r}
+renderPlot({
+  # df <- read_csv("penguins.csv")
+#   req(input$file)
+# df <- read_csv(input$file$datapath)
+  get_heatmap(df(),cor_type="spearman")
+})
+```
+
+### Kendall
+```{r}
+renderPlot({
+  # df <- read_csv("penguins.csv")
+#   req(input$file)
+# df <- read_csv(input$file$datapath)
+  get_heatmap(df(),cor_type="kendall")
+})
+```
+
+
+Normality check
+==========================================================
+
+Row
+----------------------------------------------------------
+
+### Normal QQ plots
+```{r}
+renderPlot({
+  # df <- read_csv("penguins.csv")
+#   req(input$file)
+# df <- read_csv(input$file$datapath)
+  get_qq_plots(df())
+})
+```
+
+Row
+----------------------------------------------------------
+
+### Shapiro Wilk Normality test
+```{r}
+DT::renderDataTable({
+  get_normality_results(df())
+})
+```
+
+
+Dataset
+=========================================================
+
+Row
+---------------------------------------------------------
+
+### Dataset
+
+```{r}
+DT::renderDataTable({
+  DT::datatable(df(), rownames = TRUE,options = list(bPaginate = TRUE, searching = TRUE, info = FALSE))
+})
+```
+
