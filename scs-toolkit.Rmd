@@ -55,7 +55,7 @@ get_normality_results <- function(df){
 
 make_explorer_plot <- function(df, x, y = NULL,
                                color=NULL,fill=NULL,
-                               size=NULL,geom="bar"){
+                               size=NULL,geom="bar",xlim = NULL,ylim = NULL){
   to_sym <- function(colstr){
     if(is.null(colstr)){
       return(NULL)
@@ -91,8 +91,20 @@ make_explorer_plot <- function(df, x, y = NULL,
             geom=geom)
     }
   }
-  main_plot + 
-    labs(title = paste0(title_from_geom(geom)," of ",x," and  ",y))
+  if(!is.null(xlim)){
+    main_plot <- main_plot + xlim(xlim)
+  }
+  if(!is.null(ylim)){
+    main_plot <- main_plot + ylim(ylim)
+  }
+  if(!is.null(y)){
+    main_plot + 
+    labs(title = paste0(title_from_geom(geom)," of ",x," and  ",y))  
+  }else{
+    main_plot + 
+    labs(title = paste0(title_from_geom(geom)," of ",x))
+  }
+  
 }
 ```
 
@@ -224,15 +236,41 @@ library(ggVennDiagram)
 
 plotly::renderPlotly({
 # List of items
-neg <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col < 0,na.rm = TRUE))]
-pos <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col > 0,na.rm = TRUE))]
-zero <- colnames(df())[apply(df() %>% select_if(is.numeric),2,function(col) any(col == 0,na.rm = TRUE))]
+neg <- colnames(df() %>% select_if(is.numeric))[apply(df() %>% select_if(is.numeric),2,function(col) any(col < 0,na.rm = TRUE))]
+pos <- colnames(df() %>% select_if(is.numeric))[apply(df() %>% select_if(is.numeric),2,function(col) any(col > 0,na.rm = TRUE))]
+zero <- colnames(df() %>% select_if(is.numeric))[apply(df() %>% select_if(is.numeric),2,function(col) any(col == 0,na.rm = TRUE))]
 
 x <- list(`Negative` = neg,
           `Positive` = pos,
           `Zero` = zero)
+
+print(x)
 # 3D Venn diagram
-ggVennDiagram(x,show_intersect=TRUE)
+venn <- Venn(x)
+data <- process_data(venn)
+items <- venn_region(data) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(text = stringr::str_wrap(paste0(.data$item, collapse = " "),
+                                         width = 40)) %>%
+  sf::st_as_sf()
+label_coord = sf::st_centroid(items$geometry) %>% sf::st_coordinates()
+p <- ggplot(items) +
+  geom_sf(aes_string(fill="count")) +
+  geom_sf_text(aes_string(label = "name"),
+               data = data@setLabel,
+               inherit.aes = F) +
+  geom_text(aes_string(label = "count", text = "text"),
+            x = label_coord[,1],
+            y = label_coord[,2],
+            show.legend = FALSE,color="white") +
+  theme_void() +
+  scale_fill_viridis_c()
+#> Warning: Ignoring unknown aesthetics: text
+ax <- list(
+  showline = FALSE
+)
+plotly::ggplotly(p, tooltip = c("text")) %>%
+  plotly::layout(xaxis = ax, yaxis = ax)
 })
 ```
 
@@ -267,6 +305,27 @@ renderUI({
 selectInput("select_size","Size by variable",
             choices = c(" ",colnames(df())))
 })
+renderUI({
+  req(input$select_X)
+  print(df()[[input$select_X]])
+  if(!is.null(input$select_X) & is.numeric(df()[[input$select_X]])){
+    sliderInput("slide_xlim","Range of X axis",
+            min = min(df()[[input$select_X]],na.rm=TRUE),
+            max = max(df()[[input$select_X]],na.rm=TRUE),
+            value = c(min(df()[[input$select_X]],na.rm=TRUE),
+                      max(df()[[input$select_X]],na.rm=TRUE)))
+  }
+})
+
+renderUI({
+  if(!is.null(input$select_Y) & is.numeric(df()[[input$select_Y]])){
+    sliderInput("slide_ylim","Range of Y axis",
+            min = min(df()[[input$select_Y]],na.rm=TRUE),
+            max = max(df()[[input$select_Y]],na.rm=TRUE),
+            value = c(min(df()[[input$select_Y]],na.rm=TRUE),
+                      max(df()[[input$select_Y]],na.rm=TRUE)))
+  }
+})
 ```
 
 
@@ -287,7 +346,9 @@ renderPlot({
                        color = clean(input$select_color),
                        fill = clean(input$select_fill),
                        size = clean(input$select_size),
-                       geom = input$select_geom)
+                       geom = input$select_geom,
+                       xlim = input$slide_xlim,
+                       ylim = input$slide_ylim)
   }
 })
 ```
@@ -296,35 +357,23 @@ renderPlot({
 Correlations
 =========================================================
 
-Row {.tabset .tabset-fade}
+Row
 ---------------------------------------------------------
 
-### Pearson
+### Pearson correlation
 ```{r}
 renderPlot({
   get_heatmap(df())
 })
 ```
 
-### Spearman
+### Scatterplot
 ```{r}
 renderPlot({
-  # df <- read_csv("penguins.csv")
-#   req(input$file)
-# df <- read_csv(input$file$datapath)
-  get_heatmap(df(),cor_type="spearman")
+  GGally::ggpairs(df() %>% select_if(is.numeric))
 })
 ```
 
-### Kendall
-```{r}
-renderPlot({
-  # df <- read_csv("penguins.csv")
-#   req(input$file)
-# df <- read_csv(input$file$datapath)
-  get_heatmap(df(),cor_type="kendall")
-})
-```
 
 
 Normality check
